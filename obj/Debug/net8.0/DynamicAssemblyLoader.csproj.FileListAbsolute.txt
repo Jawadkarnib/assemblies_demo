@@ -1,0 +1,14 @@
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\bin\Debug\net8.0\DynamicAssemblyLoader.exe
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\bin\Debug\net8.0\DynamicAssemblyLoader.deps.json
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\bin\Debug\net8.0\DynamicAssemblyLoader.runtimeconfig.json
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\bin\Debug\net8.0\DynamicAssemblyLoader.dll
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\bin\Debug\net8.0\DynamicAssemblyLoader.pdb
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.AssemblyInfoInputs.cache
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.AssemblyInfo.cs
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.csproj.CoreCompileInputs.cache
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.dll
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\refint\DynamicAssemblyLoader.dll
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.pdb
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\DynamicAssemblyLoader.genruntimeconfig.cache
+C:\Users\Jawad karnib\Desktop\DynamicAssemblyLoader\obj\Debug\net8.0\ref\DynamicAssemblyLoader.dll
