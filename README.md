@@ -1,5 +1,5 @@
-[HttpPost("run")]
-public IActionResult RunAllDlls([FromServices] DllStorageService dllStorage)
+[HttpPost("run-jobs")]
+public IActionResult RunJobs([FromServices] DllStorageService dllStorage)
 {
     var dllFiles = dllStorage.GetAllDlls();
     if (dllFiles == null || !dllFiles.Any())
@@ -16,38 +16,42 @@ public IActionResult RunAllDlls([FromServices] DllStorageService dllStorage)
             // Load the DLL from memory
             var assembly = Assembly.Load(dllFile.Value);
 
-            // Find a type that contains a method to execute (e.g., a class with Main())
-            var entryType = assembly.GetTypes()
-                .FirstOrDefault(t => t.GetMethod("Main", BindingFlags.Public | BindingFlags.Static) != null);
+            // Find types that implement the IJob interface
+            var jobTypes = assembly.GetTypes()
+                .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
 
-            if (entryType != null)
+            foreach (var jobType in jobTypes)
             {
-                var mainMethod = entryType.GetMethod("Main", BindingFlags.Public | BindingFlags.Static);
-                if (mainMethod != null)
+                try
                 {
-                    // Invoke the Main() method
-                    var result = mainMethod.Invoke(null, null);
-                    executionResults.Add($"Executed {dllFile.Key}: Result = {result}");
+                    // Create an instance of the type
+                    var jobInstance = (IJob)Activator.CreateInstance(jobType);
+
+                    // Execute the job
+                    jobInstance.Execute();
+
+                    executionResults.Add($"Executed job: {jobType.FullName} from {dllFile.Key}");
                 }
-                else
+                catch (Exception ex)
                 {
-                    executionResults.Add($"No suitable entry point found in {dllFile.Key}.");
+                    executionResults.Add($"Error executing job: {jobType.FullName} from {dllFile.Key}. Error: {ex.Message}");
                 }
             }
-            else
+
+            if (!jobTypes.Any())
             {
-                executionResults.Add($"No class with a 'Main' method found in {dllFile.Key}.");
+                executionResults.Add($"No jobs found in {dllFile.Key}.");
             }
         }
         catch (Exception ex)
         {
-            executionResults.Add($"Error executing {dllFile.Key}: {ex.Message}");
+            executionResults.Add($"Error loading assembly {dllFile.Key}: {ex.Message}");
         }
     }
 
     return Ok(new
     {
-        Message = "Execution completed.",
+        Message = "Job execution completed.",
         Results = executionResults
     });
 }
