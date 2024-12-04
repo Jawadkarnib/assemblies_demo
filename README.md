@@ -1,25 +1,44 @@
-using System.Collections.Concurrent;
-
-public class DllStorageService
+[HttpPost("upload-zip")]
+public async Task<IActionResult> UploadZip(IFormFile file, [FromServices] DllStorageService dllStorage)
 {
-    // Thread-safe dictionary to store DLLs
-    private readonly ConcurrentDictionary<string, byte[]> _dllFiles = new();
-
-    // Add or update a DLL file in memory
-    public void AddOrUpdateDll(string fileName, byte[] content)
+    if (file == null || file.Length == 0 || Path.GetExtension(file.FileName).ToLower() != ".zip")
     {
-        _dllFiles[fileName] = content;
+        return BadRequest("Please upload a valid .zip file.");
     }
 
-    // Retrieve all DLL files
-    public IDictionary<string, byte[]> GetAllDlls()
+    // Save the .zip file to wwwroot/uploads
+    var uploadsFolder = Path.Combine(_environment.WebRootPath, "uploads");
+    Directory.CreateDirectory(uploadsFolder); // Ensure the directory exists
+    var filePath = Path.Combine(uploadsFolder, file.FileName);
+
+    await using (var stream = new FileStream(filePath, FileMode.Create))
     {
-        return _dllFiles;
+        await file.CopyToAsync(stream);
     }
 
-    // Clear stored DLLs
-    public void ClearDlls()
+    // Extract DLLs and store in memory
+    using (var zipStream = file.OpenReadStream())
     {
-        _dllFiles.Clear();
+        using (var zipArchive = new ZipArchive(zipStream))
+        {
+            foreach (var entry in zipArchive.Entries.Where(e => e.FullName.EndsWith(".dll", System.StringComparison.OrdinalIgnoreCase)))
+            {
+                await using (var entryStream = entry.Open())
+                {
+                    using (var memoryStream = new MemoryStream())
+                    {
+                        await entryStream.CopyToAsync(memoryStream);
+                        dllStorage.AddOrUpdateDll(entry.FullName, memoryStream.ToArray());
+                    }
+                }
+            }
+        }
     }
+
+    return Ok(new
+    {
+        Message = $"{file.FileName} uploaded successfully.",
+        DllCount = dllStorage.GetAllDlls().Count,
+        ExtractedDlls = dllStorage.GetAllDlls().Keys
+    });
 }
