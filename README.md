@@ -11,6 +11,7 @@ public IActionResult RunJobsWithUnload([FromServices] DllStorageService dllStora
 
     foreach (var dllFile in dllFiles)
     {
+        // Use a custom AssemblyLoadContext for loading and unloading
         var loadContext = new UnloadableAssemblyLoadContext();
 
         try
@@ -55,6 +56,10 @@ public IActionResult RunJobsWithUnload([FromServices] DllStorageService dllStora
             loadContext.Unload();
 
             // Force garbage collection to reclaim memory immediately
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            // Additional GC pass to ensure full cleanup of the load context
             GC.Collect();
             GC.WaitForPendingFinalizers();
         }
