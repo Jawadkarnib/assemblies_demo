@@ -1,5 +1,5 @@
 [HttpPost("run-jobs")]
-public IActionResult RunJobs([FromServices] DllStorageService dllStorage)
+public IActionResult RunJobsWithUnload([FromServices] DllStorageService dllStorage)
 {
     var dllFiles = dllStorage.GetAllDlls();
     if (dllFiles == null || !dllFiles.Any())
@@ -11,41 +11,52 @@ public IActionResult RunJobs([FromServices] DllStorageService dllStorage)
 
     foreach (var dllFile in dllFiles)
     {
+        var loadContext = new UnloadableAssemblyLoadContext();
+
         try
         {
-            // Load the DLL from memory
-            var assembly = Assembly.Load(dllFile.Value);
-
-            // Find types that implement the IJob interface
-            var jobTypes = assembly.GetTypes()
-                .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
-
-            foreach (var jobType in jobTypes)
+            // Load the assembly into the custom AssemblyLoadContext
+            using (var assemblyStream = new MemoryStream(dllFile.Value))
             {
-                try
+                var assembly = loadContext.LoadFromStream(assemblyStream);
+
+                // Find types that implement the IJob interface
+                var jobTypes = assembly.GetTypes()
+                    .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+
+                foreach (var jobType in jobTypes)
                 {
-                    // Create an instance of the type
-                    var jobInstance = (IJob)Activator.CreateInstance(jobType);
-
-                    // Execute the job
-                    jobInstance.Execute();
-
-                    executionResults.Add($"Executed job: {jobType.FullName} from {dllFile.Key}");
+                    try
+                    {
+                        // Create an instance of the job and execute it
+                        var jobInstance = (IJob)Activator.CreateInstance(jobType);
+                        jobInstance.Execute();
+                        executionResults.Add($"Executed job: {jobType.FullName} from {dllFile.Key}");
+                    }
+                    catch (Exception ex)
+                    {
+                        executionResults.Add($"Error executing job: {jobType.FullName} from {dllFile.Key}. Error: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+
+                if (!jobTypes.Any())
                 {
-                    executionResults.Add($"Error executing job: {jobType.FullName} from {dllFile.Key}. Error: {ex.Message}");
+                    executionResults.Add($"No jobs found in {dllFile.Key}.");
                 }
-            }
-
-            if (!jobTypes.Any())
-            {
-                executionResults.Add($"No jobs found in {dllFile.Key}.");
             }
         }
         catch (Exception ex)
         {
             executionResults.Add($"Error loading assembly {dllFile.Key}: {ex.Message}");
+        }
+        finally
+        {
+            // Unload the assembly to free memory
+            loadContext.Unload();
+
+            // Force garbage collection to reclaim memory immediately
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
         }
     }
 
