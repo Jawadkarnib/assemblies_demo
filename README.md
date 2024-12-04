@@ -1,44 +1,53 @@
-[HttpPost("upload-zip")]
-public async Task<IActionResult> UploadZip(IFormFile file, [FromServices] DllStorageService dllStorage)
+[HttpPost("run")]
+public IActionResult RunAllDlls([FromServices] DllStorageService dllStorage)
 {
-    if (file == null || file.Length == 0 || Path.GetExtension(file.FileName).ToLower() != ".zip")
+    var dllFiles = dllStorage.GetAllDlls();
+    if (dllFiles == null || !dllFiles.Any())
     {
-        return BadRequest("Please upload a valid .zip file.");
+        return BadRequest("No DLL files are available to run.");
     }
 
-    // Save the .zip file to wwwroot/uploads
-    var uploadsFolder = Path.Combine(_environment.WebRootPath, "uploads");
-    Directory.CreateDirectory(uploadsFolder); // Ensure the directory exists
-    var filePath = Path.Combine(uploadsFolder, file.FileName);
+    var executionResults = new List<string>();
 
-    await using (var stream = new FileStream(filePath, FileMode.Create))
+    foreach (var dllFile in dllFiles)
     {
-        await file.CopyToAsync(stream);
-    }
-
-    // Extract DLLs and store in memory
-    using (var zipStream = file.OpenReadStream())
-    {
-        using (var zipArchive = new ZipArchive(zipStream))
+        try
         {
-            foreach (var entry in zipArchive.Entries.Where(e => e.FullName.EndsWith(".dll", System.StringComparison.OrdinalIgnoreCase)))
+            // Load the DLL from memory
+            var assembly = Assembly.Load(dllFile.Value);
+
+            // Find a type that contains a method to execute (e.g., a class with Main())
+            var entryType = assembly.GetTypes()
+                .FirstOrDefault(t => t.GetMethod("Main", BindingFlags.Public | BindingFlags.Static) != null);
+
+            if (entryType != null)
             {
-                await using (var entryStream = entry.Open())
+                var mainMethod = entryType.GetMethod("Main", BindingFlags.Public | BindingFlags.Static);
+                if (mainMethod != null)
                 {
-                    using (var memoryStream = new MemoryStream())
-                    {
-                        await entryStream.CopyToAsync(memoryStream);
-                        dllStorage.AddOrUpdateDll(entry.FullName, memoryStream.ToArray());
-                    }
+                    // Invoke the Main() method
+                    var result = mainMethod.Invoke(null, null);
+                    executionResults.Add($"Executed {dllFile.Key}: Result = {result}");
+                }
+                else
+                {
+                    executionResults.Add($"No suitable entry point found in {dllFile.Key}.");
                 }
             }
+            else
+            {
+                executionResults.Add($"No class with a 'Main' method found in {dllFile.Key}.");
+            }
+        }
+        catch (Exception ex)
+        {
+            executionResults.Add($"Error executing {dllFile.Key}: {ex.Message}");
         }
     }
 
     return Ok(new
     {
-        Message = $"{file.FileName} uploaded successfully.",
-        DllCount = dllStorage.GetAllDlls().Count,
-        ExtractedDlls = dllStorage.GetAllDlls().Keys
+        Message = "Execution completed.",
+        Results = executionResults
     });
 }
