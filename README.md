@@ -1,73 +1,56 @@
-[HttpPost("run-jobs")]
-public IActionResult RunJobsWithUnload([FromServices] DllStorageService dllStorage)
+public class JobRunner
 {
-    var dllFiles = dllStorage.GetAllDlls();
-    if (dllFiles == null || !dllFiles.Any())
+    public void RunJob(byte[] assemblyData)
     {
-        return BadRequest("No DLL files are available to run.");
-    }
-
-    var executionResults = new List<string>();
-
-    foreach (var dllFile in dllFiles)
-    {
-        // Use a custom AssemblyLoadContext for loading and unloading
         var loadContext = new UnloadableAssemblyLoadContext();
+        var weakRef = new WeakReference(loadContext);
 
         try
         {
-            // Load the assembly into the custom AssemblyLoadContext
-            using (var assemblyStream = new MemoryStream(dllFile.Value))
+            using (var memoryStream = new MemoryStream(assemblyData))
             {
-                var assembly = loadContext.LoadFromStream(assemblyStream);
+                var assembly = loadContext.LoadFromStream(memoryStream);
 
-                // Find types that implement the IJob interface
+                // Get all types in the assembly
                 var jobTypes = assembly.GetTypes()
-                    .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+                    .Where(t => t.GetInterfaces().Any(i => i.Name == "IJob") && !t.IsInterface && !t.IsAbstract);
 
                 foreach (var jobType in jobTypes)
                 {
-                    try
-                    {
-                        // Create an instance of the job and execute it
-                        var jobInstance = (IJob)Activator.CreateInstance(jobType);
-                        jobInstance.Execute();
-                        executionResults.Add($"Executed job: {jobType.FullName} from {dllFile.Key}");
-                    }
-                    catch (Exception ex)
-                    {
-                        executionResults.Add($"Error executing job: {jobType.FullName} from {dllFile.Key}. Error: {ex.Message}");
-                    }
-                }
+                    // Create an instance of the type using reflection
+                    var jobInstance = Activator.CreateInstance(jobType);
 
-                if (!jobTypes.Any())
-                {
-                    executionResults.Add($"No jobs found in {dllFile.Key}.");
+                    // Get the "Execute" method using reflection
+                    var executeMethod = jobType.GetMethod("Execute");
+                    if (executeMethod != null)
+                    {
+                        // Invoke the method dynamically
+                        executeMethod.Invoke(jobInstance, null);
+                    }
+
+                    // Clear any references to the instance
+                    jobInstance = null;
                 }
             }
         }
-        catch (Exception ex)
-        {
-            executionResults.Add($"Error loading assembly {dllFile.Key}: {ex.Message}");
-        }
         finally
         {
-            // Unload the assembly to free memory
+            // Unload the load context
             loadContext.Unload();
 
-            // Force garbage collection to reclaim memory immediately
+            // Force garbage collection to finalize and collect the context
             GC.Collect();
             GC.WaitForPendingFinalizers();
 
-            // Additional GC pass to ensure full cleanup of the load context
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+            // Check if the AssemblyLoadContext has been unloaded
+            if (weakRef.IsAlive)
+            {
+                Console.WriteLine("AssemblyLoadContext was NOT unloaded.");
+            }
+            else
+            {
+                Console.WriteLine("AssemblyLoadContext was unloaded successfully.");
+            }
         }
     }
-
-    return Ok(new
-    {
-        Message = "Job execution completed.",
-        Results = executionResults
-    });
 }
