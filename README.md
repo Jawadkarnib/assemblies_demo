@@ -1,56 +1,110 @@
-public class JobRunner
+[HttpPost("run-jobs")]
+public IActionResult RunJobsWithUnloadDetection([FromServices] DllStorageService dllStorage)
 {
-    public void RunJob(byte[] assemblyData)
+    var dllFiles = dllStorage.GetAllDlls();
+    if (dllFiles == null || !dllFiles.Any())
     {
-        var loadContext = new UnloadableAssemblyLoadContext();
-        var weakRef = new WeakReference(loadContext);
+        return BadRequest("No DLL files are available to run.");
+    }
+
+    var executionResults = new List<string>();
+
+    foreach (var dllFile in dllFiles)
+    {
+        // Create a unique friendly name for the AppDomain
+        string domainName = $"JobExecutionDomain_{Guid.NewGuid()}";
 
         try
         {
-            using (var memoryStream = new MemoryStream(assemblyData))
+            // Create a new AppDomain with shadow copying disabled
+            AppDomainSetup setup = new AppDomainSetup
             {
-                var assembly = loadContext.LoadFromStream(memoryStream);
+                ShadowCopyFiles = "false"
+            };
 
-                // Get all types in the assembly
+            // Create the new AppDomain
+            AppDomain jobDomain = AppDomain.CreateDomain(domainName, null, setup);
+
+            try
+            {
+                // Use a worker class that can be marshaled between AppDomains
+                var jobExecutor = (JobExecutor)jobDomain.CreateInstanceAndUnwrap(
+                    typeof(JobExecutor).Assembly.FullName, 
+                    typeof(JobExecutor).FullName
+                );
+
+                // Execute jobs in the new AppDomain
+                var domainResults = jobExecutor.ExecuteJobs(dllFile.Value);
+                executionResults.AddRange(domainResults);
+            }
+            catch (Exception ex)
+            {
+                executionResults.Add($"Error in job execution for {dllFile.Key}: {ex.Message}");
+            }
+            finally
+            {
+                // Unload the AppDomain
+                AppDomain.Unload(jobDomain);
+                executionResults.Add($"AppDomain for {dllFile.Key} was unloaded.");
+            }
+        }
+        catch (Exception ex)
+        {
+            executionResults.Add($"Critical error processing {dllFile.Key}: {ex.Message}");
+        }
+    }
+
+    return Ok(new
+    {
+        Message = "Job execution completed.",
+        Results = executionResults
+    });
+}
+
+// Serializable worker class to execute jobs
+public class JobExecutor : MarshalByRefObject
+{
+    public List<string> ExecuteJobs(byte[] dllBytes)
+    {
+        var results = new List<string>();
+
+        try
+        {
+            // Load the assembly in the new AppDomain
+            using (var assemblyStream = new MemoryStream(dllBytes))
+            {
+                var assembly = Assembly.Load(assemblyStream.ToArray());
+
+                // Find types that implement the IJob interface
                 var jobTypes = assembly.GetTypes()
-                    .Where(t => t.GetInterfaces().Any(i => i.Name == "IJob") && !t.IsInterface && !t.IsAbstract);
+                    .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
 
                 foreach (var jobType in jobTypes)
                 {
-                    // Create an instance of the type using reflection
-                    var jobInstance = Activator.CreateInstance(jobType);
-
-                    // Get the "Execute" method using reflection
-                    var executeMethod = jobType.GetMethod("Execute");
-                    if (executeMethod != null)
+                    try
                     {
-                        // Invoke the method dynamically
-                        executeMethod.Invoke(jobInstance, null);
+                        // Create an instance of the job and execute it
+                        var jobInstance = (IJob)Activator.CreateInstance(jobType);
+                        jobInstance.Execute();
+                        results.Add($"Executed job: {jobType.FullName}");
                     }
+                    catch (Exception ex)
+                    {
+                        results.Add($"Error executing job: {jobType.FullName}. Error: {ex.Message}");
+                    }
+                }
 
-                    // Clear any references to the instance
-                    jobInstance = null;
+                if (!jobTypes.Any())
+                {
+                    results.Add("No jobs found in the assembly.");
                 }
             }
         }
-        finally
+        catch (Exception ex)
         {
-            // Unload the load context
-            loadContext.Unload();
-
-            // Force garbage collection to finalize and collect the context
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-
-            // Check if the AssemblyLoadContext has been unloaded
-            if (weakRef.IsAlive)
-            {
-                Console.WriteLine("AssemblyLoadContext was NOT unloaded.");
-            }
-            else
-            {
-                Console.WriteLine("AssemblyLoadContext was unloaded successfully.");
-            }
+            results.Add($"Error loading or processing assembly: {ex.Message}");
         }
+
+        return results;
     }
 }
