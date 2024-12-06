@@ -1,196 +1,130 @@
-public class DiagnosticAssemblyLoadContext : AssemblyLoadContext
+public class DllStorage : IDllStorage
 {
-    private readonly List<object> _trackedObjects = new List<object>();
-    private readonly List<WeakReference> _weakReferences = new List<WeakReference>();
+    // Singleton implementation
+    private static readonly Lazy<DllStorage> _instance = new Lazy<DllStorage>(() => new DllStorage());
+    public static DllStorage Instance => _instance.Value;
 
-    public DiagnosticAssemblyLoadContext() : base(isCollectible: true)
+    // Heap-level unloadable context
+    private static UnloadableAssemblyLoadContext _loadContext;
+    private WeakReference<UnloadableAssemblyLoadContext> _weakLoadContext;
+
+    private readonly ConcurrentDictionary<string, byte[]> _dllFiles = new();
+
+    // Private constructor for singleton
+    private DllStorage()
     {
-        // Register resolving event to track potential resource holding
-        Resolving += OnResolving;
+        // Initialize the load context at the class level
+        _loadContext = new UnloadableAssemblyLoadContext();
+        _weakLoadContext = new WeakReference<UnloadableAssemblyLoadContext>(_loadContext);
     }
 
-    private Assembly OnResolving(AssemblyLoadContext context, AssemblyName assemblyName)
+    public void AddOrUpdateDll(string fileName, byte[] content)
     {
-        Console.WriteLine($"Resolving assembly: {assemblyName}");
-        return null;
+        _dllFiles[fileName] = content;
     }
 
-    // Override LoadFromStream to track loaded assemblies
-    public new Assembly LoadFromStream(Stream stream)
+    public IDictionary<string, byte[]> GetAllDlls()
     {
-        var assembly = base.LoadFromStream(stream);
-        
-        // Create weak reference to track potential memory leaks
-        _weakReferences.Add(new WeakReference(assembly));
-        
-        Console.WriteLine($"Loaded assembly: {assembly.FullName}");
-        
-        return assembly;
+        return _dllFiles;
     }
 
-    // Method to track objects that might prevent unloading
-    public void TrackObject(object obj)
+    public byte[] GetDll(string fileName)
     {
-        if (obj != null)
+        return _dllFiles.TryGetValue(fileName, out var result) ? result : null;
+    }
+
+    public void ClearDlls()
+    {
+        _dllFiles.Clear();
+    }
+
+    public List<string> LoadDllAsync()
+    {
+        var executionResults = new List<string>();
+        var dllFiles = this.GetAllDlls();
+        
+        if (dllFiles == null || !dllFiles.Any())
         {
-            _trackedObjects.Add(obj);
-            _weakReferences.Add(new WeakReference(obj));
-            Console.WriteLine($"Tracking object: {obj.GetType().FullName}");
+            executionResults.Add("No Dll Files found. Please add one or more assemblies.");
+            return executionResults;
         }
-    }
 
-    // Diagnostic method to check what's preventing unloading
-    public void DiagnoseUnloadingIssues()
-    {
-        Console.WriteLine("Diagnosing potential unloading issues:");
-        
-        // Check tracked objects
-        for (int i = 0; i < _trackedObjects.Count; i++)
+        foreach (var dllFile in dllFiles)
         {
-            Console.WriteLine($"Tracked Object {i}: {_trackedObjects[i]?.GetType().FullName ?? "null"}");
+            try
+            {
+                using (var assemblyStream = new MemoryStream(dllFile.Value))
+                {
+                    var assembly = _loadContext.LoadFromStream(assemblyStream);
+                    var jobTypes = assembly.GetTypes()
+                        .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+                    
+                    foreach (var jobType in jobTypes)
+                    {
+                        try
+                        {
+                            var jobInstance = (IJob)Activator.CreateInstance(jobType);
+                            var output = new StringWriter();
+                            Console.SetOut(output);
+                            jobInstance.ExecuteAsync();
+                            executionResults.Add(
+                                $"Executed job: {jobType.FullName} from {dllFile.Key} with output: {output.ToString()}");
+                        }
+                        catch (Exception ex)
+                        {
+                            executionResults.Add(
+                                $"Error executing job: {jobType.FullName} from {dllFile.Key}. Error: {ex.Message}");
+                        }
+                    }
+
+                    if (!jobTypes.Any())
+                    {
+                        executionResults.Add($"No jobs found in {dllFile.Key}.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                executionResults.Add($"Error loading assembly {dllFile.Key}: {ex.Message}");
+            }
         }
 
-        // Check weak references
-        Console.WriteLine("\nWeak Reference Status:");
-        for (int i = 0; i < _weakReferences.Count; i++)
-        {
-            bool isAlive = _weakReferences[i].IsAlive;
-            object target = _weakReferences[i].Target;
-            
-            Console.WriteLine($"Reference {i}: " +
-                $"IsAlive: {isAlive}, " +
-                $"Type: {target?.GetType().FullName ?? "null"}");
-        }
+        return executionResults;
     }
 
-    protected override Assembly Load(AssemblyName assemblyName)
+    public void UnloadDllAsync()
     {
-        Console.WriteLine($"Attempting to load assembly: {assemblyName}");
-        return null;
-    }
-}
-
-[HttpPost("run-jobs")]
-public async Task<IActionResult> RunJobsWithUnloadDetection([FromServices] DllStorageService dllStorage)
-{
-    var dllFiles = dllStorage.GetAllDlls();
-    if (dllFiles == null || !dllFiles.Any())
-    {
-        return BadRequest("No DLL files are available to run.");
-    }
-
-    var executionResults = new List<string>();
-
-    foreach (var dllFile in dllFiles)
-    {
-        // Create a custom, unloadable AssemblyLoadContext
-        var loadContext = new DiagnosticAssemblyLoadContext();
-        
-        // Create a weak reference to track unloading
-        var weakReference = new WeakReference(loadContext);
-
         try
         {
-            // Load the assembly into the custom context
-            Assembly assembly;
-            using (var memoryStream = new MemoryStream(dllFile.Value))
-            {
-                assembly = loadContext.LoadFromStream(memoryStream);
-            }
+            // Unload the current context
+            _loadContext.Unload();
 
-            // Find job types
-            var jobTypes = assembly.GetTypes()
-                .Where(t => typeof(IJob).IsAssignableFrom(t) && 
-                            !t.IsInterface && 
-                            !t.IsAbstract)
-                .ToList();
+            // Verify weak reference
+            bool isAlive = _weakLoadContext.TryGetTarget(out _);
+            
+            // Create a new load context for future use
+            _loadContext = new UnloadableAssemblyLoadContext();
+            _weakLoadContext = new WeakReference<UnloadableAssemblyLoadContext>(_loadContext);
 
-            // Execute jobs
-            foreach (var jobType in jobTypes)
-            {
-                try
-                {
-                    // Create and execute job
-                    var jobInstance = (IJob)Activator.CreateInstance(jobType);
-                    
-                    // Track the job instance
-                    (loadContext as DiagnosticAssemblyLoadContext)?.TrackObject(jobInstance);
-
-                    // Use a cancellation token to potentially cancel long-running jobs
-                    var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-                    
-                    await Task.Run(() => 
-                    {
-                        jobInstance.Execute();
-                    }, cancellationTokenSource.Token);
-
-                    executionResults.Add($"Executed job: {jobType.FullName}");
-                }
-                catch (Exception ex)
-                {
-                    executionResults.Add($"Error executing job {jobType.FullName}: {ex.Message}");
-                }
-            }
-
-            if (!jobTypes.Any())
-            {
-                executionResults.Add($"No jobs found in {dllFile.Key}");
-            }
+            // Force garbage collection
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
         }
         catch (Exception ex)
         {
-            executionResults.Add($"Error loading assembly {dllFile.Key}: {ex.Message}");
-        }
-        finally
-        {
-            // Attempt to unload with detailed diagnostics
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                try
-                {
-                    // Unload the AssemblyLoadContext
-                    loadContext.Unload();
-
-                    // Trigger aggressive garbage collection
-                    for (int i = 0; i < 3; i++)
-                    {
-                        GC.Collect(2, GCCollectionMode.Aggressive);
-                        GC.WaitForPendingFinalizers();
-                        GC.Collect(2, GCCollectionMode.Aggressive);
-                    }
-
-                    // Check if unloading was successful
-                    if (!weakReference.IsAlive)
-                    {
-                        executionResults.Add($"Successfully unloaded AssemblyLoadContext for {dllFile.Key} on attempt {attempt + 1}");
-                        break;
-                    }
-                    else
-                    {
-                        // Diagnose why it's not unloading
-                        (loadContext as DiagnosticAssemblyLoadContext)?.DiagnoseUnloadingIssues();
-                    }
-                }
-                catch (Exception unloadEx)
-                {
-                    executionResults.Add($"Unload attempt {attempt + 1} failed: {unloadEx.Message}");
-                }
-
-                // Small delay between attempts
-                await Task.Delay(500);
-            }
-
-            // Final check
-            if (weakReference.IsAlive)
-            {
-                executionResults.Add($"Failed to unload AssemblyLoadContext for {dllFile.Key} after multiple attempts");
-            }
+            // Log or handle the exception as needed
+            Console.WriteLine($"Error unloading assembly context: {ex.Message}");
         }
     }
-
-    return Ok(new
-    {
-        Message = "Job execution completed.",
-        Results = executionResults
-    });
 }
+
+
+Usage example:
+csharpCopy// Add DLLs
+DllStorage.Instance.AddOrUpdateDll("MyAssembly.dll", dllBytes);
+
+// Load and execute
+var results = DllStorage.Instance.LoadDllAsync();
+
+// Unload context when done
+DllStorage.Instance.UnloadDllAsync();
