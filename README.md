@@ -1,119 +1,172 @@
-public class DllStorage : IDllStorage, IDisposable
+using System;
+using System.Data.SqlClient;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace JobTestingNamespace
 {
-    private UnloadableAssemblyLoadContext _loadContext;
-    private readonly ConcurrentDictionary<string, byte[]> _dllFiles = new();
-
-    public DllStorage()
+    /// <summary>
+    /// Represents a complex database job for testing DLL load and unload services
+    /// </summary>
+    public class ComplexDatabaseJob : IJob
     {
-        _loadContext = new UnloadableAssemblyLoadContext();
-    }
+        private readonly string _connectionString;
+        private readonly int _batchSize;
+        private readonly string _tableName;
 
-    public void AddOrUpdateDll(string fileName, byte[] content)
-    {
-        _dllFiles[fileName] = content;
-    }
-
-    public List<string> LoadDllAsync()
-    {
-        var executionResults = new List<string>();
-        var dllFiles = this.GetAllDlls();
-        
-        if (dllFiles == null || !dllFiles.Any())
+        /// <summary>
+        /// Initializes a new instance of the ComplexDatabaseJob
+        /// </summary>
+        /// <param name="connectionString">Database connection string</param>
+        /// <param name="batchSize">Number of records to process in each batch</param>
+        /// <param name="tableName">Name of the table to process</param>
+        public ComplexDatabaseJob(
+            string connectionString, 
+            int batchSize = 100, 
+            string tableName = "JobProcessingTable")
         {
-            executionResults.Add("No Dll Files found. Please add one or more assemblies.");
-            return executionResults;
+            _connectionString = connectionString;
+            _batchSize = batchSize;
+            _tableName = tableName;
         }
 
-        foreach (var dllFile in dllFiles)
+        /// <summary>
+        /// Executes the job asynchronously
+        /// </summary>
+        /// <param name="cancellationToken">Cancellation token to cancel the job</param>
+        /// <returns>Task representing the asynchronous operation</returns>
+        public async Task ExecuteAsync(CancellationToken cancellationToken)
         {
             try
             {
-                using (var assemblyStream = new MemoryStream(dllFile.Value))
-                {
-                    var assembly = _loadContext.LoadFromStream(assemblyStream);
-                    var jobTypes = assembly.GetTypes()
-                        .Where(t => typeof(IJob).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
-                    
-                    foreach (var jobType in jobTypes)
-                    {
-                        try
-                        {
-                            var jobInstance = (IJob)Activator.CreateInstance(jobType);
-                            var output = new StringWriter();
-                            Console.SetOut(output);
-                            jobInstance.ExecuteAsync();
-                            executionResults.Add(
-                                $"Executed job: {jobType.FullName} from {dllFile.Key} with output: {output.ToString()}");
-                        }
-                        catch (Exception ex)
-                        {
-                            executionResults.Add(
-                                $"Error executing job: {jobType.FullName} from {dllFile.Key}. Error: {ex.Message}");
-                        }
-                    }
+                // Validate connection
+                await ValidateDatabaseConnectionAsync();
 
-                    if (!jobTypes.Any())
-                    {
-                        executionResults.Add($"No jobs found in {dllFile.Key}.");
-                    }
-                }
+                // Fetch and process records in batches
+                await ProcessRecordsInBatchesAsync(cancellationToken);
+
+                // Perform cleanup operations
+                await CleanupProcessedRecordsAsync();
             }
             catch (Exception ex)
             {
-                executionResults.Add($"Error loading assembly {dllFile.Key}: {ex.Message}");
+                // Log or handle exceptions
+                Console.WriteLine($"Job execution failed: {ex.Message}");
+                throw;
             }
         }
 
-        return executionResults;
-    }
-
-    public void Unload()
-    {
-        try
+        /// <summary>
+        /// Validates the database connection
+        /// </summary>
+        private async Task ValidateDatabaseConnectionAsync()
         {
-            _loadContext.Unload();
-            
-            // Create a new load context for future use
-            _loadContext = new UnloadableAssemblyLoadContext();
-            
-            // Force garbage collection
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+                
+                // Check if the table exists
+                using (var command = new SqlCommand(
+                    $"IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='{_tableName}') " +
+                    $"CREATE TABLE {_tableName} (" +
+                    "Id INT IDENTITY(1,1) PRIMARY KEY, " +
+                    "Data NVARCHAR(MAX), " +
+                    "ProcessedAt DATETIME, " +
+                    "Status NVARCHAR(50))", connection))
+                {
+                    await command.ExecuteNonQueryAsync();
+                }
+            }
         }
-        catch (Exception ex)
+
+        /// <summary>
+        /// Processes records in batches
+        /// </summary>
+        private async Task ProcessRecordsInBatchesAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine($"Error unloading assembly context: {ex.Message}");
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+
+                // Fetch unprocessed records
+                string fetchQuery = $@"
+                    SELECT TOP {_batchSize} Id, Data 
+                    FROM {_tableName} 
+                    WHERE Status IS NULL OR Status != 'Processed'
+                    ORDER BY Id";
+
+                using (var fetchCommand = new SqlCommand(fetchQuery, connection))
+                using (var reader = await fetchCommand.ExecuteReaderAsync(cancellationToken))
+                {
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        // Simulate processing
+                        int id = reader.GetInt32(0);
+                        string data = reader.GetString(1);
+
+                        await ProcessSingleRecordAsync(connection, id, data, cancellationToken);
+
+                        // Optional: Add a small delay to simulate processing time
+                        await Task.Delay(100, cancellationToken);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Processes a single record
+        /// </summary>
+        private async Task ProcessSingleRecordAsync(
+            SqlConnection connection, 
+            int id, 
+            string data, 
+            CancellationToken cancellationToken)
+        {
+            using (var updateCommand = new SqlCommand(
+                $"UPDATE {_tableName} " +
+                "SET Status = 'Processed', " +
+                "ProcessedAt = @ProcessedAt " +
+                "WHERE Id = @Id", connection))
+            {
+                updateCommand.Parameters.AddWithValue("@ProcessedAt", DateTime.UtcNow);
+                updateCommand.Parameters.AddWithValue("@Id", id);
+
+                await updateCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        /// <summary>
+        /// Cleans up processed records
+        /// </summary>
+        private async Task CleanupProcessedRecordsAsync()
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                await connection.OpenAsync();
+
+                // Optional: Delete records older than 30 days
+                using (var deleteCommand = new SqlCommand(
+                    $"DELETE FROM {_tableName} " +
+                    "WHERE Status = 'Processed' " +
+                    "AND ProcessedAt < @OldDate", connection))
+                {
+                    deleteCommand.Parameters.AddWithValue("@OldDate", DateTime.UtcNow.AddDays(-30));
+                    await deleteCommand.ExecuteNonQueryAsync();
+                }
+            }
         }
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Interface for job execution
+    /// </summary>
+    public interface IJob
     {
-        Unload();
-        GC.SuppressFinalize(this);
+        /// <summary>
+        /// Executes the job asynchronously
+        /// </summary>
+        /// <param name="cancellationToken">Cancellation token to cancel the job</param>
+        /// <returns>Task representing the asynchronous operation</returns>
+        Task ExecuteAsync(CancellationToken cancellationToken);
     }
-
-    // Other methods like GetAllDlls(), GetDll(), etc. remain the same
-}
-
-
-// Using pattern to ensure proper disposal
-using (var dllStorage = new DllStorage())
-{
-    dllStorage.AddOrUpdateDll("MyAssembly.dll", dllBytes);
-    var results = dllStorage.LoadDllAsync();
-    
-    // Explicitly unload if needed before disposing
-    dllStorage.Unload();
-}
-
-// Or with more explicit control
-var dllStorage = new DllStorage();
-try 
-{
-    dllStorage.AddOrUpdateDll("MyAssembly.dll", dllBytes);
-    var results = dllStorage.LoadDllAsync();
-}
-finally
-{
-    dllStorage.Dispose();
 }
