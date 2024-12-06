@@ -1,41 +1,16 @@
-public class DllStorage : IDllStorage
+public class DllStorage : IDllStorage, IDisposable
 {
-    // Singleton implementation
-    private static readonly Lazy<DllStorage> _instance = new Lazy<DllStorage>(() => new DllStorage());
-    public static DllStorage Instance => _instance.Value;
-
-    // Heap-level unloadable context
-    private static UnloadableAssemblyLoadContext _loadContext;
-    private WeakReference<UnloadableAssemblyLoadContext> _weakLoadContext;
-
+    private UnloadableAssemblyLoadContext _loadContext;
     private readonly ConcurrentDictionary<string, byte[]> _dllFiles = new();
 
-    // Private constructor for singleton
-    private DllStorage()
+    public DllStorage()
     {
-        // Initialize the load context at the class level
         _loadContext = new UnloadableAssemblyLoadContext();
-        _weakLoadContext = new WeakReference<UnloadableAssemblyLoadContext>(_loadContext);
     }
 
     public void AddOrUpdateDll(string fileName, byte[] content)
     {
         _dllFiles[fileName] = content;
-    }
-
-    public IDictionary<string, byte[]> GetAllDlls()
-    {
-        return _dllFiles;
-    }
-
-    public byte[] GetDll(string fileName)
-    {
-        return _dllFiles.TryGetValue(fileName, out var result) ? result : null;
-    }
-
-    public void ClearDlls()
-    {
-        _dllFiles.Clear();
     }
 
     public List<string> LoadDllAsync()
@@ -92,39 +67,53 @@ public class DllStorage : IDllStorage
         return executionResults;
     }
 
-    public void UnloadDllAsync()
+    public void Unload()
     {
         try
         {
-            // Unload the current context
             _loadContext.Unload();
-
-            // Verify weak reference
-            bool isAlive = _weakLoadContext.TryGetTarget(out _);
             
             // Create a new load context for future use
             _loadContext = new UnloadableAssemblyLoadContext();
-            _weakLoadContext = new WeakReference<UnloadableAssemblyLoadContext>(_loadContext);
-
+            
             // Force garbage collection
             GC.Collect();
             GC.WaitForPendingFinalizers();
         }
         catch (Exception ex)
         {
-            // Log or handle the exception as needed
             Console.WriteLine($"Error unloading assembly context: {ex.Message}");
         }
     }
+
+    public void Dispose()
+    {
+        Unload();
+        GC.SuppressFinalize(this);
+    }
+
+    // Other methods like GetAllDlls(), GetDll(), etc. remain the same
 }
 
 
-Usage example:
-csharpCopy// Add DLLs
-DllStorage.Instance.AddOrUpdateDll("MyAssembly.dll", dllBytes);
+// Using pattern to ensure proper disposal
+using (var dllStorage = new DllStorage())
+{
+    dllStorage.AddOrUpdateDll("MyAssembly.dll", dllBytes);
+    var results = dllStorage.LoadDllAsync();
+    
+    // Explicitly unload if needed before disposing
+    dllStorage.Unload();
+}
 
-// Load and execute
-var results = DllStorage.Instance.LoadDllAsync();
-
-// Unload context when done
-DllStorage.Instance.UnloadDllAsync();
+// Or with more explicit control
+var dllStorage = new DllStorage();
+try 
+{
+    dllStorage.AddOrUpdateDll("MyAssembly.dll", dllBytes);
+    var results = dllStorage.LoadDllAsync();
+}
+finally
+{
+    dllStorage.Dispose();
+}
